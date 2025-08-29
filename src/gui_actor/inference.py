@@ -229,7 +229,8 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
     text = data_processor.apply_chat_template(conversation,
                                             tokenize=False,
                                             add_generation_prompt=False,
-                                            chat_template=chat_template
+                                            chat_template=chat_template,
+                                            add_vision_id=True
                                             )
     text += assiatant_starter
 
@@ -278,7 +279,24 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
 
     # get the image embeddings as encoder vectors
     # image_embeds = model.visual(inputs["pixel_values"], grid_thw=inputs["image_grid_thw"]) # n_image_tokens, hidden_size
-    image_mask = (inputs["input_ids"][0] == tokenizer.encode("<|image_pad|>")[0])
+    # image_mask = (inputs["input_ids"][0] == tokenizer.encode("<|image_pad|>")[0])
+
+    # 找到所有vision_start和vision_end的位置
+    input_ids = inputs["input_ids"][0]
+    vision_start_id = tokenizer.encode("<|vision_start|>")[0]
+    vision_end_id = tokenizer.encode("<|vision_end|>")[0]
+    image_pad_id = tokenizer.encode("<|image_pad|>")[0]
+
+    start_positions = (input_ids == vision_start_id).nonzero(as_tuple=True)[0]
+    end_positions = (input_ids == vision_end_id).nonzero(as_tuple=True)[0]
+
+    # 第二张图片的范围
+    second_start = start_positions[1]
+    second_end = end_positions[1]
+
+    # 提取第二张图片的image_mask
+    image_mask = (input_ids == image_pad_id) & (torch.arange(len(input_ids), device=input_ids.device) > second_start) & (torch.arange(len(input_ids), device=input_ids.device) < second_end)
+
     image_embeds = results.hidden_states[0][0][0][image_mask] # n_image_tokens, hidden_size
 
     attn_scores, _ = model.multi_patch_pointer_head(image_embeds, decoder_hidden_states)

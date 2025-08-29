@@ -247,6 +247,7 @@ def load_model():
         
         if torch.cuda.is_available():
             model_name_or_path = "microsoft/GUI-Actor-7B-Qwen2.5-VL"
+            # model_name_or_path = "Qwen/Qwen2.5-VL-7B-Instruct"
             MODEL_CACHE['data_processor'] = AutoProcessor.from_pretrained(model_name_or_path)
             MODEL_CACHE['tokenizer'] = MODEL_CACHE['data_processor'].tokenizer
             MODEL_CACHE['model'] = modeling_qwen25vl.Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(

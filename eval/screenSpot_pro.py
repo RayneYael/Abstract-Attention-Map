@@ -2,6 +2,11 @@ import torch
 import os
 import json
 import argparse
+import sys
+
+base_dir = os.path.dirname(os.path.dirname(__file__))
+src_path = os.path.join(base_dir, "src")
+sys.path.append(src_path)
 
 from tqdm import tqdm
 from datasets import load_dataset
@@ -28,7 +33,7 @@ def normalize_bbox(bbox_x1y1x2y2, img_width, img_height):
         y2 = y2 / img_height
         return x1, y1, x2, y2
 
-def evaluate(model_name_or_path, model_type, data_fn, image_dir, use_placeholder, topk, resize_to_pixels=None):
+def evaluate(model_name_or_path, model_type, data_fn, image1_dir, image2_dir, use_placeholder, topk, resize_to_pixels=None, subplot_resize_to_pixels=None):
     # initialize model
     data_processor = AutoProcessor.from_pretrained(model_name_or_path)
     tokenizer = data_processor.tokenizer
@@ -79,23 +84,31 @@ def evaluate(model_name_or_path, model_type, data_fn, image_dir, use_placeholder
             "application": example["application"],
             "id": example["id"],
             "instruction": example["instruction"],
-            "img_size": example["img_size"],
+            "img_size": example["img_size"],            
             "bbox_x1y1x2y2": normalize_bbox(example["bbox"], example["img_size"][0], example["img_size"][1]),
             "hit_top1": 0,
             "overlap_top1": 0,
             "hit_topk": 0,
             "overlap_topk": 0,
+
+            "original_img_filename": example["original_img_filename"],
+            "original_img_size": example["original_img_size"],
+            "subplot_bbox": normalize_bbox(example["subplot_bbox"], example["original_img_size"][0], example["original_img_size"][1]),
         }
         
-        image_path = os.path.join(image_dir, example["img_filename"])
-        image = Image.open(image_path)
+        image_path1 = os.path.join(image1_dir, example["original_img_filename"])
+        image_path2 = os.path.join(image2_dir, example["img_filename"])
+        image1 = Image.open(image_path1)
+        image2 = Image.open(image_path2)
         # resize the image if needed
-        image_width, image_height = example["img_size"]
-        if (resize_to_pixels is not None) and ((image_width * image_height) != resize_to_pixels):
-            resize_ratio = (resize_to_pixels / (image_width * image_height)) ** 0.5
-            image_width_resized, image_height_resized = int(image_width * resize_ratio), int(image_height * resize_ratio)
-            image = image.resize((image_width_resized, image_height_resized))
-            ele["img_size_resized"] = [image_width_resized, image_height_resized]
+        image1_width, image1_height = example["original_img_size"]
+        image2_width, image2_height = example["img_size"]
+        if (resize_to_pixels is not None) and ((image1_width * image1_height) != resize_to_pixels):
+            resize_ratio = (resize_to_pixels / (image1_width * image1_height)) ** 0.5
+            image1_width_resized, image1_height_resized = int(image1_width * resize_ratio), int(image1_height * resize_ratio)
+            image1 = image1.resize((image1_width_resized, image1_height_resized))
+
+            ele["img_size_resized"] = [image1_width_resized, image1_height_resized]
         else:
             ele["img_size_resized"] = None
         
@@ -114,8 +127,12 @@ def evaluate(model_name_or_path, model_type, data_fn, image_dir, use_placeholder
                 "content": [
                     {
                         "type": "image",
-                        "image": image, # PIL.Image.Image or str to path
+                        "image": image1, # PIL.Image.Image or str to path
                         # "image_url": "https://xxxxx.png" or "https://xxxxx.jpg" or "file://xxxxx.png" or "data:image/png;base64,xxxxxxxx", will be split by "base64,"
+                    },
+                    {
+                        "type": "image",
+                        "image": image2, # PIL.Image.Image or str to path
                     },
                     {
                         "type": "text",
@@ -277,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_path", type=str, default="./")
     parser.add_argument("--data_path", type=str, default="/mnt/data/ScreenSpot-Pro")
     parser.add_argument("--resize_to_pixels", type=int, default=3200*1800, help="If set to <0, will not resize the image.")
+    parser.add_argument("--subplot_resize_to_pixels", type=int, default=-1, help="If set to <0, will not resize the image.")
     parser.add_argument('--no-placeholder', dest='use_placeholder', action='store_false', help='Disable the placeholder')
     parser.add_argument('--topk', type=int, default=3, help='Topk')
     parser.set_defaults(use_placeholder=True)
@@ -284,8 +302,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     resize_to_pixels = args.resize_to_pixels if args.resize_to_pixels > 0 else None
-    image_dir = os.path.join(args.data_path, "images")
-    data_fn = os.path.join(args.data_path, "annotations/all.json")
+    subplot_resize_to_pixels = args.subplot_resize_to_pixels if args.subplot_resize_to_pixels > 0 else None
+    image1_dir = os.path.join(args.data_path, "images")
+    image2_dir = os.path.join(args.data_path, "cropped_ScreenSpot-Pro/images")
+
+    data_fn = os.path.join(args.data_path, "cropped_ScreenSpot-Pro/annotations/all.json")
     save_path = args.save_path
     if not os.path.exists(save_path):
         os.makedirs(save_path, exist_ok=True)
@@ -301,7 +322,7 @@ if __name__ == "__main__":
             results = json.load(f)
     else:
         print(f"Evaluating {args.model_name_or_path}...")
-        results = evaluate(args.model_name_or_path, args.model_type, data_fn, image_dir, args.use_placeholder, args.topk, resize_to_pixels)
+        results = evaluate(args.model_name_or_path, args.model_type, data_fn, image1_dir, image2_dir, args.use_placeholder, args.topk, resize_to_pixels, subplot_resize_to_pixels)
         with open(pred_path, "w") as f:
             json.dump(results, f)
         print(f"Saved {len(results)} predictions to {pred_path}")
