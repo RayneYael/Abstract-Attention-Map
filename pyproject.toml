@@ -1,5 +1,5 @@
 [project]
-name = "gui-actor"
+name = "GUI-Actor"
 version = "0.1.0"
 description = "Coordinate-Free Visual Grounding for GUI Agents"
 authors = [

@@ -233,7 +233,7 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
                                             add_vision_id=True
                                             )
     text += assiatant_starter
-
+    
     # prepare inputs
     image_inputs, video_inputs = process_vision_info(conversation)
     inputs = data_processor(text=[text],
@@ -301,8 +301,8 @@ def inference(conversation, model, tokenizer, data_processor, logits_processor=N
 
     attn_scores, _ = model.multi_patch_pointer_head(image_embeds, decoder_hidden_states)
     pred["attn_scores"] = attn_scores.tolist()
-
-    _, n_height, n_width = (inputs["image_grid_thw"][0] // model.visual.spatial_merge_size).tolist()
+    # 卧槽,这里inputs["image_grid_thw"][0]取的是第一张图
+    _, n_height, n_width = (inputs["image_grid_thw"][1] // model.visual.spatial_merge_size).tolist()
     pred["n_width"] = n_width
     pred["n_height"] = n_height
 

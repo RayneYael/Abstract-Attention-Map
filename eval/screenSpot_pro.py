@@ -3,6 +3,7 @@ import os
 import json
 import argparse
 import sys
+import matplotlib.pyplot as plt
 
 base_dir = os.path.dirname(os.path.dirname(__file__))
 src_path = os.path.join(base_dir, "src")
@@ -12,7 +13,7 @@ from tqdm import tqdm
 from datasets import load_dataset
 from transformers import AutoProcessor
 from PIL import Image
-from gui_actor.constants import chat_template
+from gui_actor.constants import chat_template, grounding_system_message
 from gui_actor.modeling import Qwen2VLForConditionalGenerationWithPointer
 from gui_actor.modeling_qwen25vl import Qwen2_5_VLForConditionalGenerationWithPointer
 from gui_actor.inference import inference, ForceFollowTokensLogitsProcessor
@@ -48,7 +49,8 @@ def evaluate(model_name_or_path, model_type, data_fn, image1_dir, image2_dir, us
             device_map="cuda:0",
             attn_implementation="flash_attention_2"
         ).eval()
-        grounding_system_message = "You are a GUI agent. You are given a task and a screenshot of the screen. You need to perform a series of pyautogui actions to complete the task."
+        print(f"grounding_system_message: {grounding_system_message}")
+        #grounding_system_message = "You are a GUI agent. You are given a task and a screenshot of the screen. You need to perform a series of pyautogui actions to complete the task." if not grounding_system_message else grounding_system_message
     elif model_type == "qwen25vl":
         print(f"Loading model with Qwen2.5-VL backbone from {model_name_or_path}")
         model = Qwen2_5_VLForConditionalGenerationWithPointer.from_pretrained(
@@ -57,7 +59,8 @@ def evaluate(model_name_or_path, model_type, data_fn, image1_dir, image2_dir, us
             device_map="cuda:0",
             attn_implementation="flash_attention_2"
         ).eval()
-        grounding_system_message = "You are a GUI agent. Given a screenshot of the current GUI and a human instruction, your task is to locate the screen element that corresponds to the instruction. You should output a PyAutoGUI action that performs a click on the correct position. To indicate the click location, we will use some special tokens, which is used to refer to a visual patch later. For example, you can output: pyautogui.click(<your_special_token_here>)."
+        print(f"grounding_system_message: {grounding_system_message}")
+        # grounding_system_message = "You are a GUI agent. Given a screenshot of the current GUI and a human instruction, your task is to locate the screen element that corresponds to the instruction. You should output a PyAutoGUI action that performs a click on the correct position. To indicate the click location, we will use some special tokens, which is used to refer to a visual patch later. For example, you can output: pyautogui.click(<your_special_token_here>)." if not grounding_system_message else grounding_system_message
     else:
         raise ValueError(f"Invalid model type: {model_type}")
     print(f"Loaded model from {model_name_or_path}")
@@ -142,7 +145,36 @@ def evaluate(model_name_or_path, model_type, data_fn, image1_dir, image2_dir, us
             },
         ]
 
+        # # Print conversation text content
+        # print("=== Conversation Text ===")
+        # for turn in conversation:
+        #     role = turn["role"]
+        #     for content in turn["content"]:
+        #         if content["type"] == "text":
+        #             print(f"{role}: {content['text']}")
+
+        # # Show images in conversation
+        # for idx, turn in enumerate(conversation):
+        #     for idy, content in enumerate(turn["content"]):
+        #         if content["type"] == "image":
+        #             img = content["image"]
+        #             if isinstance(img, Image.Image):
+        #                 plt.figure()
+        #                 plt.imshow(img)
+        #                 plt.title(f"Conversation Image (role: {turn['role']})")
+        #                 plt.axis('off')
+        #                 plt.savefig(f'debug_image_{idy}_{turn["role"]}.png', bbox_inches='tight')
+        #                 plt.close()  # 释放内存
+        #                 print(f"图片已保存: debug_image_{idy}_{turn['role']}.png")
+
+        # # Print ground truth info from ele
+        # print("=== Ground Truth Info ===")
+        # for k in ["file_name", "ui_type", "group", "platform", "application", "id", "instruction", "img_size", "bbox_x1y1x2y2"]:
+        #     print(f"{k}: {ele.get(k)}")
+
+
         pred = inference(conversation, model, tokenizer, data_processor, logits_processor=logits_processor_pointer, use_placeholder=use_placeholder, topk=3)
+        
         topk_points = pred["topk_points"]
         gt_bbox = ele["bbox_x1y1x2y2"]
 
@@ -291,7 +323,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_type", type=str, default="qwen25vl", choices=["qwen2vl", "qwen25vl"])
     parser.add_argument("--model_name_or_path", type=str, default="microsoft/GUI-Actor-7B-Qwen2.5-VL")
-    parser.add_argument("--save_path", type=str, default="./")
+    parser.add_argument("--save_path", type=str, default="./eval_results")
     parser.add_argument("--data_path", type=str, default="/mnt/data/ScreenSpot-Pro")
     parser.add_argument("--resize_to_pixels", type=int, default=3200*1800, help="If set to <0, will not resize the image.")
     parser.add_argument("--subplot_resize_to_pixels", type=int, default=-1, help="If set to <0, will not resize the image.")

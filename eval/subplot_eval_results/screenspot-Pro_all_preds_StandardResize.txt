@@ -1,0 +1,5 @@
+	Dev-text	Dev-icon	Dev-avg	Creative-text	Creative-icon	Creative-avg	CAD-text	CAD-icon	CAD-avg	Scientific-text	Scientific-icon	Scientific-avg	Office-text	Office-icon	Office-avg	OS-text	OS-icon	OS-avg	All-text	All-icon	All-avg
+hit_top1	61.69	34.48	48.49	47.98	30.77	40.76	57.36	20.31	48.28	63.89	26.36	47.64	66.10	50.94	62.61	60.75	56.18	58.67	59.06	35.26	49.97
+overlap_top1	73.38	49.66	61.87	67.17	46.85	58.65	72.08	37.50	63.60	82.64	50.00	68.50	82.49	73.58	80.43	71.96	69.66	70.92	74.72	52.81	66.35
+hit_topk	68.83	40.69	55.18	53.03	34.97	45.45	59.39	31.25	52.49	67.36	30.00	51.18	72.32	52.83	67.83	70.09	64.04	67.35	64.28	40.89	55.34
+overlap_topk	81.17	57.93	69.90	75.25	53.15	65.98	77.16	50.00	70.50	86.11	58.18	74.02	90.40	81.13	88.26	82.24	78.65	80.61	81.68	61.09	73.81
