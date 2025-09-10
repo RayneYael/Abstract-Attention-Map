@@ -167,8 +167,21 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids) # shape: (batch_size, seq_len, d_model)
             if pixel_values is not None:
-                pixel_values = pixel_values.type(self.visual.dtype)
-                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                # [MODIFICATION 1: Reshape inputs for multi-image processing]
+                batch_size, num_images, C, H, W = pixel_values.shape
+                # Keep the original image_grid_thw for later slicing logic
+                original_image_grid_thw = image_grid_thw 
+
+                pixel_values_reshaped = pixel_values.reshape(batch_size * num_images, C, H, W)
+                pixel_values_reshaped = pixel_values_reshaped.type(self.visual.dtype)
+
+                image_grid_thw_reshaped = None
+                if image_grid_thw is not None:
+                    image_grid_thw_reshaped = image_grid_thw.reshape(batch_size * num_images, 3)
+
+                image_embeds = self.visual(pixel_values_reshaped, grid_thw=image_grid_thw_reshaped)
+                # [END MODIFICATION 1]
+
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                 n_image_features = image_embeds.shape[0]
                 if n_image_tokens != n_image_features:
@@ -214,7 +227,7 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             ):
                 position_ids, rope_deltas = self.get_rope_index(
-                    input_ids, image_grid_thw, video_grid_thw, attention_mask
+                    input_ids, image_grid_thw_reshaped, video_grid_thw, attention_mask
                 )
                 self.rope_deltas = rope_deltas
             # then use the prev pre-calculated rope-deltas to get the correct position ids
@@ -293,12 +306,6 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                     if if_multi_patch:  # task the first 4 visual tokens as the ground truth
                         sample_labels = torch.zeros_like(visual_indices).unsqueeze(0)
                         sample_labels[0][:4] = 1
-                        # n_t = target_indices.size(0)          # 目标 token 个数
-                        # n_v = visual_indices.size(0)
-                        # sample_labels = torch.zeros(
-                        #     (n_t, n_v), device=hs.device, dtype=torch.float
-                        # )
-                        # sample_labels[:, :min(4, n_v)] = 1
                     dummy_target = True
                 else:
                     # For supervision, we assume that visual_token_indices_of_coordinates[i] is a tensor of shape (n_target,)
@@ -306,19 +313,20 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                     gt = visual_token_indices_of_coordinates[i].to(hs.device) # shape: (n_target,)
                     if if_multi_patch:
                         sample_labels = multi_patch_labels[i]
-                        # if sample_labels is None:
-                        #     n_t = target_indices.size(0)          # 目标 token 个数
-                        #     n_v = visual_indices.size(0)
-                        #     sample_labels = torch.zeros(
-                        #         (n_t, n_v), device=hs.device, dtype=torch.float
-                        #     )
-                        #     sample_labels[:, :min(4, n_v)] = 1
-                        #     dummy_target = True
                 
-                # Gather the corresponding hidden state representations.
-                # visual_hidden = hs[visual_indices]  # shape: (n_visual, d_model)
                 visual_embeds = inputs_embeds[i][visual_indices]
                 target_hidden = hs[target_indices]  # shape: (n_target, d_model)
+
+                # [MODIFICATION 2: Isolate sub-image embeddings]
+                sub_image_visual_embeds = visual_embeds
+                if original_image_grid_thw is not None:
+                    # original_image_grid_thw has shape (B, 2, 3)
+                    num_images_in_sample = original_image_grid_thw[i].shape[0]
+                    if num_images_in_sample > 1:
+                        original_img_grid = original_image_grid_thw[i, 0]
+                        num_tokens_original_img = (original_img_grid[1] * original_img_grid[2]).item()
+                        sub_image_visual_embeds = visual_embeds[num_tokens_original_img:]
+                # [END MODIFICATION 2]
 
                 # Calculate loss for multi-patch mode
                 if if_multi_patch:
@@ -326,16 +334,16 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                     if sample_labels.shape[0] != target_indices.shape[0]:
                         raise ValueError(f"Sample {i} has mismatched target counts: {sample_labels.shape[0]} labels but found {target_indices.shape[0]} target tokens")
 
-                    # Process using VisionHead_MultiPatch
+                    # [MODIFICATION 3: Use sub-image embeddings for loss calculation]
                     attn_scores, loss_v = self.multi_patch_pointer_head(
-                        visual_embeds,
+                        sub_image_visual_embeds,
                         target_hidden,
                         labels=sample_labels
                     )
                     
                 else:
                     # Deprecated branch - single patch mode is no longer used
-                    # Run the action head to compute the attention (from target tokens to visual tokens) and its loss.
+                    # THIS BRANCH IS INTENTIONALLY UNTOUCHED AS PER USER'S REQUEST
                     attn_scores, loss_v = self.pointer_head(visual_embeds, target_hidden, labels=gt)
                 
                 pointer_scores.append(attn_scores.detach().cpu())

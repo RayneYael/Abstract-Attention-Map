@@ -358,176 +358,146 @@ class LazySupervisedDataset(Dataset):
 
     def preprocess_qwen2vl(
         self,
-        source, # conversations
+        sources,
         tokenizer: transformers.PreTrainedTokenizer,
         processor: transformers.ProcessorMixin,
-        image: list,
-        system_message: str = grounding_system_message,
-        agent_mode: bool = True,
-        chat_template: str = chat_template,
-        assistant_template: str = assistant_template,
-        id: int = None,
+        image_list_path: list, # This is now a list of paths
+        **kwargs,
     ) -> Dict:
-        roles = {"human": "user", "gpt": "assistant", "system": "system"}
-        assistant_template = assistant_template if agent_mode else chat_template
-        processor.tokenizer = tokenizer
-        assert tokenizer.additional_special_tokens == ADDITIONAL_SPECIAL_TOKENS
+        from .crop import crop_image_for_training
+        from PIL import Image
 
-        # Apply prompt templates
-        pixel_values, image_grid_thw = None, None
+        # Initialization of data collection lists
+        all_texts = []
+        all_instruction_ids = []
+        all_images = []
+        all_sub_image_offsets = []
+        all_sub_image_gt_bboxes = []
+        all_original_gt_bboxes = []
+        has_sub_image = []
 
-        input_id, target = [], []
-        coordinates = []
-        visual_token_indices_of_coordinates = []
-        multi_patch_labels = []
-        
-        image_list = []
-        image_index = 0
+        original_image = None
+        original_gt_bbox = None
 
-        ## prepare the system message
-        if roles[source[0]["from"]] == "system":
-            system_message = source[0]["value"]
-            source = source[1:self.data_args.max_conv_turns]
-        # else: use the constant system message
-        system_input_id = tokenizer.apply_chat_template(
-            conversation=[{"role": "system", "content": [{"type": "text", "text": system_message}]}],
-            chat_template=chat_template,
-        )
-        input_id += system_input_id
-        target += [IGNORE_INDEX] * len(system_input_id)
-
-        ## prepare user-assistant conversation
-        for conv in source:
-            # regularize the conversation format
-            try:
-                role = conv["role"]
-                content = conv["content"]
-            except Exception:
-                role = conv["from"]
-                content = conv["value"]
-            role = roles.get(role, role)
-
-            # Count the number of <image> tokens in the content
-            image_count = content.count(DEFAULT_IMAGE_TOKEN)
-            if image_count > 0:
-                assert role == "user", "Images are only supported for user messages"
-                # include image information regarding to current conversation turn
-                image_placeholders = []
-                for _ in range(image_count):
-                    image_placeholders.append({
-                        "type": "image",
-                        "image": image[image_index],
-                        "min_pixels": self.processor.image_processor.min_pixels,
-                        "max_pixels": self.processor.image_processor.max_pixels,
-                    })
-                    image_index += 1
-
-                content = content.replace(DEFAULT_IMAGE_TOKEN, "")
-                conv = {"role": role, "content": image_placeholders + [{"type": "text", "text": content}]}
-
-                image_inputs, _ = process_vision_info([conv]) # list of PIL.Image.Image
-                image_list.extend(image_inputs)
-                
-                templated_conv = tokenizer.apply_chat_template(
-                    conversation=[conv], chat_template=chat_template, tokenize=False
-                )
-                inputs = processor(text=[templated_conv], images=image_inputs, return_tensors="pt")
-
-                if pixel_values is None and image_grid_thw is None:
-                    pixel_values = inputs["pixel_values"]
-                    image_grid_thw = inputs["image_grid_thw"]
-                else:
-                    pixel_values = torch.concat([pixel_values, inputs["pixel_values"]], dim=0)
-                    image_grid_thw = torch.concat([image_grid_thw, inputs["image_grid_thw"]], dim=0)
-            else:
-                if role in ["user", "system"]:
-                    conv = {"role": role, "content": [{"type": "text", "text": content}]}
-                else:  # assistant
-                    conv = {
-                        "role": role,
-                        "content": [{"type": "text", "text": content}],
-                        "recipient": conv.get("recipient", "os"),
-                        "end_turn": conv.get("end_turn", True),
-                        "bbox_gt": conv.get("bbox_gt", None),
-                    }
-                    if conv["recipient"] == "os":
-                        if len(image_inputs) == 0:
-                            raise ValueError("No image found for visual grounding")
-                        # replace the coordinates with the special tokens
-                        text, coord = reformat_coordinates(conv["content"][0]["text"])
-                        conv["content"][0]["text"] = text
-                        # rank0_print(f"coord: {coord}")
-
-                        # get the visual token indices of the coordinates
-                        coordinates.extend(coord)
-                        for (point_x, point_y) in coord:
-                            visual_token_index = get_token_index(
-                                processor.image_processor,
-                                image_list,
-                                point_x,
-                                point_y
-                            )
-                            # px, py = token_index_to_coordinates(
-                            #     processor.image_processor,
-                            #     visual_token_index,
-                            #     image_list[0].size[0], # make sure the size here is after qwen2vl processing
-                            #     image_list[0].size[1]
-                            # )
-                            # rank0_print(f"estimated px: {px}, py: {py}")
-                            visual_token_indices_of_coordinates.append(visual_token_index)
-
-                            if conv["bbox_gt"] is not None:
-                                patch_mask = get_multi_patch_labels(
-                                    processor.image_processor,
-                                    image_list,
-                                    conv["bbox_gt"]
-                                )  
-                                multi_patch_labels.append(patch_mask)
-
-                templated_conv = tokenizer.apply_chat_template(
-                    conversation=[conv],
-                    chat_template=assistant_template,
-                    tokenize=False,
-                )
-                inputs = processor(text=[templated_conv], return_tensors="pt")
-
-            encode_id = inputs.input_ids[0].tolist()
-
-            input_id += encode_id
-            if role in ["user", "system"]:
-                target += [IGNORE_INDEX] * len(encode_id)
-            else:
-                target += encode_id
-
-        assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
-
-        # make the labels of all pointer_end_token_id to be IGNORE_INDEX
-        target = [IGNORE_INDEX if token == self.pointer_end_token_id else token for token in target]
-
-        input_ids = torch.tensor([input_id], dtype=torch.long)
-        targets = torch.tensor([target], dtype=torch.long)
-        visual_token_indices_of_coordinates = torch.tensor([visual_token_indices_of_coordinates], dtype=torch.long) if len(visual_token_indices_of_coordinates) > 0 else [None]
-        coordinates = [coordinates] if len(coordinates) > 0 else [None]
-
-        # process multi_patch_labels
-        if len(multi_patch_labels) > 0:
-            multi_patch_labels = [torch.stack(multi_patch_labels)]
+        # Process system message first if it exists
+        if sources[0]['from'].lower() == 'system':
+            system_message = sources[0]['value']
+            sources = sources[1:]
         else:
-            multi_patch_labels = [None]
-
-        data_dict = {
-            "input_ids": input_ids,  # tensor(bs x seq_len)
-            "labels": targets,  # tensor(bs x seq_len)
-        }
-
-        if pixel_values is not None:
-            data_dict["pixel_values"] = pixel_values
-            data_dict["image_grid_thw"] = image_grid_thw
+            system_message = grounding_system_message
         
-        # if len(coordinates[0]) != len(visual_token_indices_of_coordinates[0]):
-        #     raise ValueError(f"The number of coordinates ({len(coordinates[0])}) does not match the number of image token indices ({len(visual_token_indices_of_coordinates[0])})")
-        data_dict["coordinates"] = coordinates
-        data_dict["visual_token_indices_of_coordinates"] = visual_token_indices_of_coordinates
-        data_dict["multi_patch_labels"] = multi_patch_labels
+        system_text = f"system\n{system_message}"
+        all_texts.append(system_text)
+        all_instruction_ids.append(0) # System message is not part of the loss
+
+        # Process conversation turns
+        for i, sentence in enumerate(sources):
+            sentence_from = sentence["from"].lower()
+            sentence_value = sentence["value"]
+
+            # ---------------- Human Turn ----------------
+            if sentence_from == "human":
+                if DEFAULT_IMAGE_TOKEN in sentence_value and image_list_path:
+                    # Assuming the first image in the list corresponds to the human's turn
+                    image_path = image_list_path.pop(0)
+                    try:
+                        image = Image.open(image_path).convert("RGB")
+                        original_image = image
+                        
+                        image_tensor = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
+                        all_images.append(image_tensor)
+                        
+                        # The <image> token is kept in the text for the tokenizer
+                    except Exception as e:
+                        rank0_print(f"Error loading image {image_path}: {e}")
+                        sentence_value = sentence_value.replace(DEFAULT_IMAGE_TOKEN, "").strip()
+                
+                text = f"user\n{sentence_value}"
+                instruction_id = 0
+
+            # ---------------- GPT/Assistant Turn ----------------
+            else:
+                try:
+                    content_data = json.loads(sentence_value)
+                    original_gt_bbox = content_data.get("bbox_gt")
+                    sentence_value = content_data.get("text", "")
+                except (json.JSONDecodeError, TypeError):
+                    original_gt_bbox = None
+
+                if original_image and original_gt_bbox:
+                    crop_info = crop_image_for_training(original_image, original_gt_bbox)
+                    
+                    if crop_info:
+                        all_sub_image_offsets.append(crop_info["offset"])
+                        all_sub_image_gt_bboxes.append(crop_info["sub_image_gt_bbox"])
+                        all_original_gt_bboxes.append(crop_info["original_gt_bbox"])
+                        has_sub_image.append(True)
+
+                        sub_image_tensor = processor.preprocess(crop_info["sub_image"], return_tensors="pt")["pixel_values"][0]
+                        all_images.append(sub_image_tensor)
+
+                        # Generate multi-patch labels for the sub-image to maintain output format consistency
+                        patch_mask = get_multi_patch_labels(
+                            processor.image_processor,
+                            [crop_info["sub_image"]],  # Pass sub-image
+                            crop_info["sub_image_gt_bbox"] # Pass sub-image's GT Bbox
+                        )
+                        all_multi_patch_labels.append(patch_mask)
+
+                        assistant_prefix = "Based on the cropped sub-image, I will now provide a more precise solution. "
+                        sentence_value = f"{assistant_prefix}{DEFAULT_IMAGE_TOKEN}\n{sentence_value}"
+                    else:
+                        has_sub_image.append(False)
+                else:
+                    has_sub_image.append(False)
+
+                text = f"assistant\n{sentence_value}"
+                instruction_id = 1
+
+            all_texts.append(text)
+            all_instruction_ids.append(instruction_id)
+
+        # --- Final Tokenization and Label Creation ---
+        full_text = "\n".join(all_texts)
         
+        # Replace all <image> tokens with the actual image token for the tokenizer
+        full_text = full_text.replace(DEFAULT_IMAGE_TOKEN, tokenizer.image_token)
+        
+        input_ids = tokenizer(full_text, return_tensors="pt", padding=False).input_ids[0]
+        labels = input_ids.clone()
+        
+        # Mask out non-assistant parts for loss calculation
+        tokenized_parts = [tokenizer(text.replace(DEFAULT_IMAGE_TOKEN, tokenizer.image_token), return_tensors="pt", padding=False).input_ids[0] for text in all_texts] 
+        
+        current_pos = 0
+        for i, part_ids in enumerate(tokenized_parts):
+            if all_instruction_ids[i] == 0:  # Mask system and user inputs
+                labels[current_pos : current_pos + len(part_ids)] = IGNORE_INDEX
+            current_pos += len(part_ids)
+
+        # --- Final Data Dictionary Construction ---
+        pixel_values = torch.stack(all_images) if all_images else None
+
+        # The rest of the data_dict items are handled in __getitem__ after this function returns
+        # We return a more complete dict here to be pruned later
+        data_dict = dict(
+            input_ids=input_ids,
+            labels=labels,
+            pixel_values=pixel_values,
+            sub_image_offsets=torch.tensor(all_sub_image_offsets, dtype=torch.float32) if all_sub_image_offsets else torch.empty(0, 2),
+            sub_image_gt_bboxes=torch.tensor(all_sub_image_gt_bboxes, dtype=torch.float32) if all_sub_image_gt_bboxes else torch.empty(0, 4),
+            original_gt_bboxes=torch.tensor(all_original_gt_bboxes, dtype=torch.float32) if all_original_gt_bboxes else torch.empty(0, 4),
+            has_sub_image=torch.tensor(has_sub_image, dtype=torch.bool) if has_sub_image else torch.empty(0, dtype=torch.bool),
+            # These are placeholders as the original function had them, they might not be needed with the new logic
+            coordinates=[[]],
+            visual_token_indices_of_coordinates=[[]],
+            image_grid_thw=None, # This is specific to Qwen1.5VL processor, might not be needed
+            multi_patch_labels=[[]],
+        )
+        
+        # Wrap tensors in a list to match the expected output format of the original __getitem__
+        for key in ['input_ids', 'labels', 'sub_image_offsets', 'sub_image_gt_bboxes', 'original_gt_bboxes', 'has_sub_image']:
+            if data_dict[key] is not None:
+                data_dict[key] = [data_dict[key]]
+
         return data_dict
