@@ -255,7 +255,6 @@ analysis/
 amlt/
 eval/eval-analyzer/frontend/package-lock.json
 eval/eval-analyzer/frontend/package.json
-data/data_config.yaml
 eval/eval-analyzer/frontend/public/evaluation_results.json
 eval/eval-analyzer/frontend/public/evaluation_results2.json
 eval/*results*
