@@ -3,6 +3,14 @@ import random
 from PIL import Image
 import numpy as np
 
+import base64
+from io import BytesIO
+
+def pil_to_base64(image):
+    buffer = BytesIO()
+    image.save(buffer, format='PNG')
+    return f"data:image;base64,{base64.b64encode(buffer.getvalue()).decode()}"
+
 # 从 run_crop.sh 和 crop.py 脚本中提取的硬编码参数
 SCALE_FACTOR = 0.15
 MODE = "center"
@@ -128,6 +136,7 @@ def crop_image_for_training(original_image: Image.Image, original_gt_bbox: list[
 
         return {
             "sub_image": sub_image,
+            "sub_image_b64": pil_to_base64(sub_image),
             "offset": offset,
             "sub_image_gt_bbox": sub_image_gt_bbox,
             "original_gt_bbox": original_gt_bbox

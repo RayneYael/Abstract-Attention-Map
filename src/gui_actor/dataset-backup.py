@@ -26,7 +26,6 @@ from gui_actor.constants import (
     grounding_system_message,
 )
 from gui_actor.trainer import rank0_print
-from gui_actor.crop import crop_image_for_training
 
 
 def reformat_coordinates(text):
@@ -382,6 +381,7 @@ class LazySupervisedDataset(Dataset):
         visual_token_indices_of_coordinates = []
         multi_patch_labels = []
         
+        image_list = []
         image_index = 0
 
         ## prepare the system message
@@ -412,21 +412,21 @@ class LazySupervisedDataset(Dataset):
             if image_count > 0:
                 assert role == "user", "Images are only supported for user messages"
                 # include image information regarding to current conversation turn
-                image_placeholder = [
-                    {
+                image_placeholders = []
+                for _ in range(image_count):
+                    image_placeholders.append({
                         "type": "image",
                         "image": image[image_index],
                         "min_pixels": self.processor.image_processor.min_pixels,
                         "max_pixels": self.processor.image_processor.max_pixels,
-                    }
-                ]
-
-                original_image = Image.open(image[image_index - 1]).convert("RGB")
+                    })
+                    image_index += 1
 
                 content = content.replace(DEFAULT_IMAGE_TOKEN, "")
-                conv = {"role": role, "content": image_placeholder + [{"type": "text", "text": content}]}
+                conv = {"role": role, "content": image_placeholders + [{"type": "text", "text": content}]}
 
                 image_inputs, _ = process_vision_info([conv]) # list of PIL.Image.Image
+                image_list.extend(image_inputs)
                 
                 templated_conv = tokenizer.apply_chat_template(
                     conversation=[conv], chat_template=chat_template, tokenize=False
@@ -443,47 +443,19 @@ class LazySupervisedDataset(Dataset):
                 if role in ["user", "system"]:
                     conv = {"role": role, "content": [{"type": "text", "text": content}]}
                 else:  # assistant
-                    
-                    sub_image, sub_image_b64, sub_image_offset, sub_bbox_gt, bbox_gt = crop_image_for_training(original_image, conv.get("bbox_gt", []))
-
-                    # Calculate the center of sub_bbox_gt as coord
-                    # sub_bbox_gt format: [x_min, y_min, x_max, y_max], values in [0, 1]
-                    coord = [((sub_bbox_gt[0] + sub_bbox_gt[2]) / 2, (sub_bbox_gt[1] + sub_bbox_gt[3]) / 2)]
-
-
-                    sub_image_placeholder = [
-                        {
-                            "type": "image",
-                            "image": sub_image_b64,
-                            "min_pixels": self.processor.image_processor.min_pixels,
-                            "max_pixels": self.processor.image_processor.max_pixels,
-                        }
-                    ]
-
-                    conv_vision = {
-                        "role": role,
-                        "content": sub_image_placeholder + [{"type": "text", "text": content}], # content记得加内容
-                    }
-
-                    image_inputs, _ = process_vision_info([conv_vision]) # list of PIL.Image.Image
-
                     conv = {
                         "role": role,
-                        "content": sub_image_placeholder + [{"type": "text", "text": content}], # TODO: content记得加内容
-                        # "recipient": conv.get("recipient", "os"),
-                        "recipient": "vision_analyzer"
+                        "content": [{"type": "text", "text": content}],
+                        "recipient": conv.get("recipient", "os"),
                         "end_turn": conv.get("end_turn", True),
-                        # "bbox_gt": bbox_gt, # original image bbox
-                        "sub_bbox_gt": sub_bbox_gt # cropped image bbox
-                    }                    
-
-                    if conv["recipient"] == "vision_analyzer":
+                        "bbox_gt": conv.get("bbox_gt", None),
+                    }
+                    if conv["recipient"] == "os":
                         if len(image_inputs) == 0:
                             raise ValueError("No image found for visual grounding")
                         # replace the coordinates with the special tokens
-                        # text, coord = reformat_coordinates(conv["content"][0]["text"])
-                        text, _ = reformat_coordinates(conv["content"][1]["text"])
-                        conv["content"][1]["text"] = text
+                        text, coord = reformat_coordinates(conv["content"][0]["text"])
+                        conv["content"][0]["text"] = text
                         # rank0_print(f"coord: {coord}")
 
                         # get the visual token indices of the coordinates
@@ -491,7 +463,7 @@ class LazySupervisedDataset(Dataset):
                         for (point_x, point_y) in coord:
                             visual_token_index = get_token_index(
                                 processor.image_processor,
-                                [sub_image],
+                                image_list,
                                 point_x,
                                 point_y
                             )
@@ -504,11 +476,11 @@ class LazySupervisedDataset(Dataset):
                             # rank0_print(f"estimated px: {px}, py: {py}")
                             visual_token_indices_of_coordinates.append(visual_token_index)
 
-                            if conv["sub_bbox_gt"] is not None:
+                            if conv["bbox_gt"] is not None:
                                 patch_mask = get_multi_patch_labels(
                                     processor.image_processor,
-                                    [sub_image],
-                                    conv["sub_bbox_gt"]
+                                    image_list,
+                                    conv["bbox_gt"]
                                 )  
                                 multi_patch_labels.append(patch_mask)
 
@@ -517,27 +489,20 @@ class LazySupervisedDataset(Dataset):
                     chat_template=assistant_template,
                     tokenize=False,
                 )
-                inputs = processor(text=[templated_conv], image=image_inputs, return_tensors="pt")
+                inputs = processor(text=[templated_conv], return_tensors="pt")
 
-                if pixel_values is None and image_grid_thw is None:
-                    pixel_values = inputs["pixel_values"]
-                    image_grid_thw = inputs["image_grid_thw"]
-                else:
-                    pixel_values = torch.cat([pixel_values, inputs["pixel_values"]], dim=0) # 形状: (13416 + M, 1176)
-                    image_grid_thw = torch.cat([image_grid_thw, inputs["image_grid_thw"]], dim=0) # (2, 3)
- 
             encode_id = inputs.input_ids[0].tolist()
 
             input_id += encode_id
             if role in ["user", "system"]:
                 target += [IGNORE_INDEX] * len(encode_id)
-            else: # TODO: 当role为assistant时，应当忽略vision占位符
+            else:
                 target += encode_id
 
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
 
-        # make the labels of all pointer_end_token_id to be IGNORE_INDEX why???
-        target = [IGNORE_INDEX if token in [self.pointer_end_token_id, self.tokenizer.encode("<|vision_start|>"), self.tokenizer.encode("<|vision_end|>"), self.tokenizer.encode("<|vision_pad|>")] else token for token in target]
+        # make the labels of all pointer_end_token_id to be IGNORE_INDEX
+        target = [IGNORE_INDEX if token == self.pointer_end_token_id else token for token in target]
 
         input_ids = torch.tensor([input_id], dtype=torch.long)
         targets = torch.tensor([target], dtype=torch.long)

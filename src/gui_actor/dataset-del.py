@@ -12,6 +12,7 @@ import transformers
 import yaml
 from qwen_vl_utils import smart_resize, process_vision_info
 from torch.utils.data import Dataset
+from PIL import Image
 
 from gui_actor.constants import (
     IGNORE_INDEX,
@@ -26,8 +27,7 @@ from gui_actor.constants import (
     grounding_system_message,
 )
 from gui_actor.trainer import rank0_print
-from gui_actor.crop import crop_image_for_training
-
+from .crop import crop_image_for_training
 
 def reformat_coordinates(text):
     """
@@ -118,6 +118,8 @@ def get_multi_patch_labels(image_processor, image, bbox_gt):
         image: the image in PIL format
         bbox_gt: the bounding box in the format of (x_min, y_min, x_max, y_max) [0,1]
     """
+    if not image or not bbox_gt:
+        return torch.zeros(0)
     if len(image) != 1:
         raise ValueError(f"Expected 1 image, got {len(image)}")
 
@@ -125,16 +127,18 @@ def get_multi_patch_labels(image_processor, image, bbox_gt):
     image = image[0]
     w, h = image.size
 
-    bbox_gt = [bbox_gt[0]*w, bbox_gt[1]*h, bbox_gt[2]*w, bbox_gt[3]*h]
+    bbox_gt_abs = [bbox_gt[0]*w, bbox_gt[1]*h, bbox_gt[2]*w, bbox_gt[3]*h]
     # Extract bounding box coordinates
-    x_min, y_min, x_max, y_max = bbox_gt
+    x_min, y_min, x_max, y_max = bbox_gt_abs
     x_min = max(0, x_min)
     y_min = max(0, y_min)
     x_max = min(w, x_max)
     y_max = min(h, y_max)
 
     merge_patch_size = image_processor.patch_size * image_processor.merge_size
-    assert w % merge_patch_size == 0 and h % merge_patch_size == 0, f"Image size {w}x{h} is not divisible by merge_patch_size {merge_patch_size}"
+    if w % merge_patch_size != 0 or h % merge_patch_size != 0:
+        raise ValueError(f"Image size {w}x{h} is not divisible by merge_patch_size {merge_patch_size}")
+
     grid_h, grid_w = h // merge_patch_size, w // merge_patch_size
 
     binary_mask = torch.zeros(grid_h * grid_w)
@@ -181,7 +185,7 @@ class LazySupervisedDataset(Dataset):
         self.pointer_start_token_id = tokenizer.encode(DEFAULT_POINTER_START_TOKEN)[0]
         self.pointer_end_token_id = tokenizer.encode(DEFAULT_POINTER_END_TOKEN)[0]
 
-        # Handle multiple JSON files specified in the data_path
+        # Data loading logic from backup...
         if "{" in data_path and "}" in data_path:
             base_path, file_pattern = re.match(r"^(.*)\{(.*)\}\.json$", data_path).groups()
             file_names = file_pattern.split(",")
@@ -199,14 +203,6 @@ class LazySupervisedDataset(Dataset):
             with open(data_path) as file:
                 yaml_data = yaml.safe_load(file)
                 datasets = yaml_data.get("datasets")
-                # file should be in the format of:
-                # datasets:
-                #   - json_path: xxxx1.json
-                #     sampling_strategy: first:1000
-                #   - json_path: xxxx2.json
-                #     sampling_strategy: end:3000
-                #   - json_path: xxxx3.json
-                #     sampling_strategy: random:999
                 data_args.dataset_paths = [dataset.get("json_path") for dataset in datasets]
                 for dataset in datasets:
                     json_path = dataset.get("json_path")
@@ -222,8 +218,6 @@ class LazySupervisedDataset(Dataset):
                             for line in json_file:
                                 cur_data_dict.append(json.loads(line.strip()))
                     elif json_path.endswith(".json"):
-                        # NOTE: we only use json_path with .json now
-                        # Handle the images_folder in yaml
                         with open(json_path) as json_file:
                             cur_data_dict = json.load(json_file)
                     else:
@@ -232,11 +226,10 @@ class LazySupervisedDataset(Dataset):
                     if ":" in sampling_strategy:
                         sampling_strategy, sampling_number = sampling_strategy.split(":")
                         if "%" in sampling_number:
-                            sampling_number = math.ceil(int(sampling_number.split("%")[0]) * len(cur_data_dict) / 100)
+                            sampling_number = math.ceil(int(sampling_number.split("%"[0]) * len(cur_data_dict) / 100))
                         else:
                             sampling_number = int(sampling_number)
 
-                    # Apply the sampling strategy
                     if sampling_strategy == "first" and sampling_number is not None:
                         cur_data_dict = cur_data_dict[:sampling_number]
                     elif sampling_strategy == "end" and sampling_number is not None:
@@ -255,7 +248,7 @@ class LazySupervisedDataset(Dataset):
                 cur_data_dict = json.load(file)
                 rank0_print(f"Loaded {len(cur_data_dict)} samples from {data_path}")
                 self.list_data_dict.extend(cur_data_dict)
-                self.list_image_path.extend([""] * len(cur_data_dict))  # NOTE: the image subfolder is empty...
+                self.list_image_path.extend([""] * len(cur_data_dict))
 
         rank0_print(f"Loaded {len(self.list_data_dict)} samples from {data_path}")
         rank0_print("Formatting inputs...Skip in lazy mode")
@@ -293,67 +286,51 @@ class LazySupervisedDataset(Dataset):
         return length_list
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        sample = self._get_item(i)
-        if sample is None:
-            new_index = random.randint(0, len(self.list_data_dict) - 1)
-            return self.__getitem__(new_index)
-        else:
-            return sample
-        try:
-            sample = self._get_item(i)
-            if sample is None:
-                new_index = random.randint(0, len(self.list_data_dict) - 1)
-                return self.__getitem__(new_index)
-        except Exception as e:
-            print(f"Failed to fetch sample {i}. Exception:", e)
-            new_index = random.randint(0, len(self.list_data_dict) - 1)
-            return self.__getitem__(new_index)
-        return sample
+        for _ in range(3): # Retry up to 3 times
+            try:
+                sample = self._get_item(i)
+                if sample is not None:
+                    return sample
+            except Exception as e:
+                rank0_print(f"Error processing sample {i}, trying next. Error: {e}")
+                i = random.randint(0, len(self.list_data_dict) - 1)
+        
+        rank0_print(f"Failed to process sample {i} after multiple retries, getting a random one.")
+        return self.__getitem__(random.randint(0, len(self.list_data_dict) - 1))
 
     def _get_item(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
-        image_path = os.path.join(self.data_args.image_folder, self.list_image_path[i])
+        image_path_prefix = os.path.join(self.data_args.image_folder, self.list_image_path[i])
 
         if "image" in sources:
             image_file = self.list_data_dict[i]["image"]
-            if type(image_file) is list:
-                image_list = [os.path.join(image_path, image_file) for image_file in image_file]
-            else:
-                image_list = [os.path.join(image_path, image_file)]
-
+            image_paths = [os.path.join(image_path_prefix, f) for f in image_file] if isinstance(image_file, list) else [os.path.join(image_path_prefix, image_file)]
             sources = copy.deepcopy(sources["conversations"])
-        elif "video" in sources:
-            raise NotImplementedError("Video is not supported for Qwen2VL")
         else:
+            image_paths = []
             sources = copy.deepcopy(sources["conversations"])
 
         item_id = self.list_data_dict[i].get("id", i)
 
-        data_dict = self.preprocess_qwen2vl(sources, self.tokenizer, self.processor, image_list, id=item_id)
+        data_dict = self.preprocess_qwen2vl(sources, self.tokenizer, self.processor, image_paths, id=item_id)
+        
         if isinstance(i, int):
+            # Flatten the batched outputs from preprocess_qwen2vl
             data_dict = {
-                "input_ids": data_dict["input_ids"][0],
-                "labels": data_dict["labels"][0],
-                "coordinates": data_dict["coordinates"][0],
-                "visual_token_indices_of_coordinates": data_dict["visual_token_indices_of_coordinates"][0],
-                "pixel_values": data_dict["pixel_values"],
-                "image_grid_thw": data_dict["image_grid_thw"],
-                "multi_patch_labels": data_dict["multi_patch_labels"][0],   # add multi_patch_labels                
+                key: val[0] if isinstance(val, list) and len(val) > 0 and isinstance(val[0], torch.Tensor) else val
+                for key, val in data_dict.items()
             }
 
         data_dict["id"] = item_id
 
-        # return None if the input_ids is longer than the model_max_length
-        n_image_tokens = (
-            data_dict["image_grid_thw"][0][0] * 
-            data_dict["image_grid_thw"][0][1] * 
-            data_dict["image_grid_thw"][0][2] / 
-            self.processor.image_processor.merge_size / 
-            self.processor.image_processor.merge_size
-        )
-        if (len(data_dict["input_ids"]) + n_image_tokens) > self.tokenizer.model_max_length:
-            rank0_print(f"=== Removed data_dict {i} because it is longer than the model_max_length: {len(data_dict['input_ids'])} + {n_image_tokens} > {self.tokenizer.model_max_length}")
-            return None
+        if data_dict.get("pixel_values") is not None:
+            n_image_tokens = sum(
+                grid[1] * grid[2]
+                for grid in data_dict["image_grid_thw"]
+            )
+            if (len(data_dict["input_ids"]) + n_image_tokens) > self.tokenizer.model_max_length:
+                rank0_print(f"=== Removed data_dict {i} because it is longer than the model_max_length: {len(data_dict['input_ids'])} + {n_image_tokens} > {self.tokenizer.model_max_length}")
+                return None
 
         return data_dict
 
@@ -362,33 +339,36 @@ class LazySupervisedDataset(Dataset):
         source, # conversations
         tokenizer: transformers.PreTrainedTokenizer,
         processor: transformers.ProcessorMixin,
-        image: list,
+        image_paths: list, # Now a list of paths
         system_message: str = grounding_system_message,
         agent_mode: bool = True,
         chat_template: str = chat_template,
         assistant_template: str = assistant_template,
         id: int = None,
     ) -> Dict:
-        roles = {"human": "user", "gpt": "assistant", "system": "system"}
-        assistant_template = assistant_template if agent_mode else chat_template
-        processor.tokenizer = tokenizer
-        assert tokenizer.additional_special_tokens == ADDITIONAL_SPECIAL_TOKENS
-
-        # Apply prompt templates
-        pixel_values, image_grid_thw = None, None
-
-        input_id, target = [], []
-        coordinates = []
-        visual_token_indices_of_coordinates = []
-        multi_patch_labels = []
         
-        image_index = 0
+        original_image_pil = None
+        new_data_to_return = {
+            "sub_image_offsets": [],
+            "sub_image_gt_bboxes": [],
+            "original_gt_bboxes": [],
+            "has_sub_image": [],
+        }
 
-        ## prepare the system message
-        if roles[source[0]["from"]] == "system":
+        roles = {"human": "user", "gpt": "assistant", "system": "system"}
+        processor.tokenizer = tokenizer
+
+        pixel_values_list, image_grid_thw_list = [], []
+        input_id, target = [], []
+        coordinates, visual_token_indices_of_coordinates, multi_patch_labels = [], [], []
+        
+        image_path_index = 0
+        processed_pil_images = []
+
+        if roles.get(source[0]["from"]) == "system":
             system_message = source[0]["value"]
             source = source[1:self.data_args.max_conv_turns]
-        # else: use the constant system message
+
         system_input_id = tokenizer.apply_chat_template(
             conversation=[{"role": "system", "content": [{"type": "text", "text": system_message}]}],
             chat_template=chat_template,
@@ -396,9 +376,9 @@ class LazySupervisedDataset(Dataset):
         input_id += system_input_id
         target += [IGNORE_INDEX] * len(system_input_id)
 
-        ## prepare user-assistant conversation
-        for conv in source:
-            # regularize the conversation format
+        for conv_original in source:
+            conv = copy.deepcopy(conv_original)
+
             try:
                 role = conv["role"]
                 content = conv["content"]
@@ -407,162 +387,125 @@ class LazySupervisedDataset(Dataset):
                 content = conv["value"]
             role = roles.get(role, role)
 
-            # Count the number of <image> tokens in the content
             image_count = content.count(DEFAULT_IMAGE_TOKEN)
-            if image_count > 0:
-                assert role == "user", "Images are only supported for user messages"
-                # include image information regarding to current conversation turn
-                image_placeholder = [
-                    {
-                        "type": "image",
-                        "image": image[image_index],
-                        "min_pixels": self.processor.image_processor.min_pixels,
-                        "max_pixels": self.processor.image_processor.max_pixels,
-                    }
-                ]
+            proc_conv = conv # Start with the original conv
 
-                original_image = Image.open(image[image_index - 1]).convert("RGB")
-
-                content = content.replace(DEFAULT_IMAGE_TOKEN, "")
-                conv = {"role": role, "content": image_placeholder + [{"type": "text", "text": content}]}
-
-                image_inputs, _ = process_vision_info([conv]) # list of PIL.Image.Image
-                
-                templated_conv = tokenizer.apply_chat_template(
-                    conversation=[conv], chat_template=chat_template, tokenize=False
-                )
-                inputs = processor(text=[templated_conv], images=image_inputs, return_tensors="pt")
-
-                if pixel_values is None and image_grid_thw is None:
-                    pixel_values = inputs["pixel_values"]
-                    image_grid_thw = inputs["image_grid_thw"]
-                else:
-                    pixel_values = torch.concat([pixel_values, inputs["pixel_values"]], dim=0)
-                    image_grid_thw = torch.concat([image_grid_thw, inputs["image_grid_thw"]], dim=0)
-            else:
-                if role in ["user", "system"]:
-                    conv = {"role": role, "content": [{"type": "text", "text": content}]}
-                else:  # assistant
-                    
-                    sub_image, sub_image_b64, sub_image_offset, sub_bbox_gt, bbox_gt = crop_image_for_training(original_image, conv.get("bbox_gt", []))
-
-                    # Calculate the center of sub_bbox_gt as coord
-                    # sub_bbox_gt format: [x_min, y_min, x_max, y_max], values in [0, 1]
-                    coord = [((sub_bbox_gt[0] + sub_bbox_gt[2]) / 2, (sub_bbox_gt[1] + sub_bbox_gt[3]) / 2)]
-
-
-                    sub_image_placeholder = [
-                        {
+            # --- USER TURN --- 
+            if image_count > 0 and role == "user":
+                image_placeholders = []
+                if image_path_index < len(image_paths):
+                    try:
+                        img_path = image_paths[image_path_index]
+                        pil_img = Image.open(img_path).convert("RGB")
+                        original_image_pil = pil_img # Store original image
+                        image_placeholders.append({
                             "type": "image",
-                            "image": sub_image_b64,
+                            "image": img_path,
+                            "min_pixels": self.processor.image_processor.min_pixels,
+                            "max_pixels": self.processor.image_processor.max_pixels,
+                        })
+                        image_path_index += 1
+                    except Exception as e:
+                        rank0_print(f"Could not load image {img_path}: {e}")
+                
+                text_content = content.replace(DEFAULT_IMAGE_TOKEN, "")
+                proc_conv = {"role": role, "content": image_placeholders + [{"type": "text", "text": text_content}]}
+
+            # --- ASSISTANT TURN --- 
+            elif role == "assistant":
+                bbox_gt_val = conv.get("bbox_gt")
+                text_content = content
+                sub_image_generated = False
+
+                if original_image_pil and bbox_gt_val:
+                    crop_info = crop_image_for_training(original_image_pil, bbox_gt_val)
+                    if crop_info:
+                        sub_image_pil = crop_info["sub_image"]
+                        assistant_prefix = "Based on the cropped sub-image, I will now provide a more precise solution. "
+                        text_content = f'{assistant_prefix}{DEFAULT_IMAGE_TOKEN}\n{text_content}'
+                        
+                        sub_image_placeholder = {
+                            "type": "image",
+                            "image": sub_image_pil,
                             "min_pixels": self.processor.image_processor.min_pixels,
                             "max_pixels": self.processor.image_processor.max_pixels,
                         }
-                    ]
 
-                    conv_vision = {
-                        "role": role,
-                        "content": sub_image_placeholder + [{"type": "text", "text": content}], # content记得加内容
-                    }
+                        proc_conv = {
+                            "role": role, 
+                            "content": [sub_image_placeholder, {"type": "text", "text": text_content}],
+                            "recipient": conv.get("recipient", "os"),
+                        }
+                        
+                        conv["bbox_gt"] = crop_info["sub_image_gt_bbox"]
 
-                    image_inputs, _ = process_vision_info([conv_vision]) # list of PIL.Image.Image
+                        new_data_to_return["sub_image_offsets"].append(crop_info["offset"])
+                        new_data_to_return["sub_image_gt_bboxes"].append(crop_info["sub_image_gt_bbox"])
+                        new_data_to_return["original_gt_bboxes"].append(crop_info["original_gt_bbox"])
+                        new_data_to_return["has_sub_image"].append(True)
+                        sub_image_generated = True
+                
+                if not sub_image_generated:
+                    new_data_to_return["has_sub_image"].append(False)
+                    proc_conv = {"role": role, "content": [{"type": "text", "text": text_content}]}
 
-                    conv = {
-                        "role": role,
-                        "content": sub_image_placeholder + [{"type": "text", "text": content}], # TODO: content记得加内容
-                        # "recipient": conv.get("recipient", "os"),
-                        "recipient": "vision_analyzer"
-                        "end_turn": conv.get("end_turn", True),
-                        # "bbox_gt": bbox_gt, # original image bbox
-                        "sub_bbox_gt": sub_bbox_gt # cropped image bbox
-                    }                    
+            # --- UNIFIED PROCESSING PER TURN (FROM BACKUP) ---
+            image_inputs, _ = process_vision_info([proc_conv])
+            processed_pil_images.extend(image_inputs)
 
-                    if conv["recipient"] == "vision_analyzer":
-                        if len(image_inputs) == 0:
-                            raise ValueError("No image found for visual grounding")
-                        # replace the coordinates with the special tokens
-                        # text, coord = reformat_coordinates(conv["content"][0]["text"])
-                        text, _ = reformat_coordinates(conv["content"][1]["text"])
-                        conv["content"][1]["text"] = text
-                        # rank0_print(f"coord: {coord}")
+            templated_conv = tokenizer.apply_chat_template(
+                conversation=[proc_conv],
+                chat_template=assistant_template if role == 'assistant' else chat_template,
+                tokenize=False,
+            )
+            inputs = processor(text=[templated_conv], images=image_inputs, return_tensors="pt")
 
-                        # get the visual token indices of the coordinates
-                        coordinates.extend(coord)
-                        for (point_x, point_y) in coord:
-                            visual_token_index = get_token_index(
-                                processor.image_processor,
-                                [sub_image],
-                                point_x,
-                                point_y
-                            )
-                            # px, py = token_index_to_coordinates(
-                            #     processor.image_processor,
-                            #     visual_token_index,
-                            #     image_list[0].size[0], # make sure the size here is after qwen2vl processing
-                            #     image_list[0].size[1]
-                            # )
-                            # rank0_print(f"estimated px: {px}, py: {py}")
-                            visual_token_indices_of_coordinates.append(visual_token_index)
+            if image_inputs:
+                pixel_values_list.append(inputs["pixel_values"])
+                image_grid_thw_list.append(inputs["image_grid_thw"])
 
-                            if conv["sub_bbox_gt"] is not None:
-                                patch_mask = get_multi_patch_labels(
-                                    processor.image_processor,
-                                    [sub_image],
-                                    conv["sub_bbox_gt"]
-                                )  
-                                multi_patch_labels.append(patch_mask)
+            if role == 'assistant' and proc_conv.get("recipient") == "os" and conv.get("bbox_gt"):
+                text_for_reformat, coord = reformat_coordinates(templated_conv)
+                coordinates.extend(coord)
+                if image_inputs:
+                    patch_mask = get_multi_patch_labels(
+                        processor.image_processor,
+                        [image_inputs[-1]], # Use the last processed image (sub-image if present)
+                        conv["bbox_gt"]
+                    )  
+                    multi_patch_labels.append(patch_mask)
 
-                templated_conv = tokenizer.apply_chat_template(
-                    conversation=[conv],
-                    chat_template=assistant_template,
-                    tokenize=False,
-                )
-                inputs = processor(text=[templated_conv], image=image_inputs, return_tensors="pt")
-
-                if pixel_values is None and image_grid_thw is None:
-                    pixel_values = inputs["pixel_values"]
-                    image_grid_thw = inputs["image_grid_thw"]
-                else:
-                    pixel_values = torch.cat([pixel_values, inputs["pixel_values"]], dim=0) # 形状: (13416 + M, 1176)
-                    image_grid_thw = torch.cat([image_grid_thw, inputs["image_grid_thw"]], dim=0) # (2, 3)
- 
             encode_id = inputs.input_ids[0].tolist()
-
             input_id += encode_id
             if role in ["user", "system"]:
                 target += [IGNORE_INDEX] * len(encode_id)
-            else: # TODO: 当role为assistant时，应当忽略vision占位符
+            else:
                 target += encode_id
 
+        # --- FINAL ASSEMBLY ---
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
-
-        # make the labels of all pointer_end_token_id to be IGNORE_INDEX why???
-        target = [IGNORE_INDEX if token in [self.pointer_end_token_id, self.tokenizer.encode("<|vision_start|>"), self.tokenizer.encode("<|vision_end|>"), self.tokenizer.encode("<|vision_pad|>")] else token for token in target]
-
-        input_ids = torch.tensor([input_id], dtype=torch.long)
-        targets = torch.tensor([target], dtype=torch.long)
-        visual_token_indices_of_coordinates = torch.tensor([visual_token_indices_of_coordinates], dtype=torch.long) if len(visual_token_indices_of_coordinates) > 0 else [None]
-        coordinates = [coordinates] if len(coordinates) > 0 else [None]
-
-        # process multi_patch_labels
-        if len(multi_patch_labels) > 0:
-            multi_patch_labels = [torch.stack(multi_patch_labels)]
-        else:
-            multi_patch_labels = [None]
+        target = [IGNORE_INDEX if token == self.pointer_end_token_id else token for token in target]
 
         data_dict = {
-            "input_ids": input_ids,  # tensor(bs x seq_len)
-            "labels": targets,  # tensor(bs x seq_len)
+            "input_ids": [torch.tensor(input_id, dtype=torch.long)],
+            "labels": [torch.tensor(target, dtype=torch.long)],
+            "coordinates": [coordinates] if coordinates else [[]],
+            "visual_token_indices_of_coordinates": [visual_token_indices_of_coordinates] if visual_token_indices_of_coordinates else [[]],
+            "multi_patch_labels": [torch.stack(multi_patch_labels)] if multi_patch_labels else [None],
         }
 
-        if pixel_values is not None:
-            data_dict["pixel_values"] = pixel_values
-            data_dict["image_grid_thw"] = image_grid_thw
+        if pixel_values_list:
+            data_dict["pixel_values"] = torch.cat(pixel_values_list, dim=0)
+            data_dict["image_grid_thw"] = torch.cat(image_grid_thw_list, dim=0)
         
-        # if len(coordinates[0]) != len(visual_token_indices_of_coordinates[0]):
-        #     raise ValueError(f"The number of coordinates ({len(coordinates[0])}) does not match the number of image token indices ({len(visual_token_indices_of_coordinates[0])})")
-        data_dict["coordinates"] = coordinates
-        data_dict["visual_token_indices_of_coordinates"] = visual_token_indices_of_coordinates
-        data_dict["multi_patch_labels"] = multi_patch_labels
+        for key, val in new_data_to_return.items():
+            if val:
+                dtype = torch.bool if key == 'has_sub_image' else torch.float32
+                data_dict[key] = [torch.tensor(val, dtype=dtype)]
+            else:
+                if 'bboxes' in key: empty_tensor = torch.empty(0, 4)
+                elif 'offsets' in key: empty_tensor = torch.empty(0, 2)
+                else: empty_tensor = torch.empty(0, dtype=torch.bool)
+                data_dict[key] = [empty_tensor]
         
         return data_dict
