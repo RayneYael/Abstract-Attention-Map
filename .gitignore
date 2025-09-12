@@ -258,3 +258,5 @@ eval/eval-analyzer/frontend/package.json
 eval/eval-analyzer/frontend/public/evaluation_results.json
 eval/eval-analyzer/frontend/public/evaluation_results2.json
 eval/*results*
+eval/eval-analyzer/frontend/public/images
+eval/eval-analyzer/frontend/public/images2

@@ -5,7 +5,7 @@ llm_model="Qwen/Qwen2.5-VL-7B-Instruct"
 output_dir="./checkpoints/${model_type}_warmup"
 
 # === Training Command ===
-CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 torchrun --nproc_per_node=7 train.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 train.py \
   --deepspeed ./scripts/zero3.json \
   --save_total_limit 3 \
   --data_path data/data_config.yaml \
