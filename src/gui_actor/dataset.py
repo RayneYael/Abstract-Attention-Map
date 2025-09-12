@@ -490,7 +490,7 @@ class LazySupervisedDataset(Dataset):
                         for (point_x, point_y) in coord:
                             visual_token_index = get_token_index(
                                 processor.image_processor,
-                                [sub_image],
+                                [image_inputs],
                                 point_x,
                                 point_y
                             )
@@ -506,7 +506,7 @@ class LazySupervisedDataset(Dataset):
                             if conv["sub_bbox_gt"] is not None:
                                 patch_mask = get_multi_patch_labels(
                                     processor.image_processor,
-                                    [sub_image],
+                                    [image_inputs],
                                     conv["sub_bbox_gt"]
                                 )  
                                 multi_patch_labels.append(patch_mask)
