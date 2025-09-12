@@ -397,26 +397,20 @@ class LazySupervisedDataset(Dataset):
         target += [IGNORE_INDEX] * len(system_input_id)
 
         ## prepare user-assistant conversation
-        for conv_user, conv_assistant in source:
+        for conv in source:
             # regularize the conversation format
-            user_role = conv["from"]
-            user_content = conv["value"]
-
-            assistant_role = conv_assistant["from"]
-            assistant_content = conv_assistant["value"]
-
-            user_role = roles.get(user_role, user_role)
-            assistant_role = roles.get(assistant_role, assistant_role)
-
+            try:
+                role = conv["role"]
+                content = conv["content"]
+            except Exception:
+                role = conv["from"]
+                content = conv["value"]
+            role = roles.get(role, role)
 
             # Count the number of <image> tokens in the content
-            image_count = user_content.count(DEFAULT_IMAGE_TOKEN)
+            image_count = content.count(DEFAULT_IMAGE_TOKEN)
             if image_count > 0:
-                assert user_role == "user", "Images are only supported for user messages"
-
-                original_image = Image.open(image[image_index - 1]).convert("RGB")
-                sub_image, sub_image_b64, sub_image_offset, sub_bbox_gt, bbox_gt = crop_image_for_training(original_image, conv_assistant.get("bbox_gt", []))
-
+                assert role == "user", "Images are only supported for user messages"
                 # include image information regarding to current conversation turn
                 image_placeholder = [
                     {
@@ -424,100 +418,125 @@ class LazySupervisedDataset(Dataset):
                         "image": image[image_index],
                         "min_pixels": self.processor.image_processor.min_pixels,
                         "max_pixels": self.processor.image_processor.max_pixels,
-                    },
-                    {
-                        "type": "image",
-                        "image": sub_image_b64,
-                        "min_pixels": self.processor.image_processor.min_pixels,
-                        "max_pixels": self.processor.image_processor.max_pixels,
                     }
                 ]
 
-                content = user_content.replace(DEFAULT_IMAGE_TOKEN, "")
-                conv = {"role": user_role, "content": image_placeholder + [{"type": "text", "text": content}]}
+                original_image = Image.open(image[image_index - 1]).convert("RGB")
+
+                content = content.replace(DEFAULT_IMAGE_TOKEN, "")
+                conv = {"role": role, "content": image_placeholder + [{"type": "text", "text": content}]}
 
                 image_inputs, _ = process_vision_info([conv]) # list of PIL.Image.Image
                 
                 templated_conv = tokenizer.apply_chat_template(
-                    conversation=[conv], chat_template=chat_template, tokenize=False, add_vision_id=True
+                    conversation=[conv], chat_template=chat_template, tokenize=False
                 )
                 inputs = processor(text=[templated_conv], images=image_inputs, return_tensors="pt")
 
                 if pixel_values is None and image_grid_thw is None:
                     pixel_values = inputs["pixel_values"]
                     image_grid_thw = inputs["image_grid_thw"]
+                else:
+                    pixel_values = torch.concat([pixel_values, inputs["pixel_values"]], dim=0)
+                    image_grid_thw = torch.concat([image_grid_thw, inputs["image_grid_thw"]], dim=0)
+            else:
+                if role in ["user", "system"]:
+                    conv = {"role": role, "content": [{"type": "text", "text": content}]}
+                else:  # assistant
+                    sub_image, sub_image_b64, sub_image_offset, sub_bbox_gt, bbox_gt = crop_image_for_training(original_image, conv.get("bbox_gt", []))
 
-                encode_id = inputs.input_ids[0].tolist()
-                input_id += encode_id
-                target += [IGNORE_INDEX] * len(encode_id)
+                    # Calculate the center of sub_bbox_gt as coord
+                    # sub_bbox_gt format: [x_min, y_min, x_max, y_max], values in [0, 1]
+                    coord = [((sub_bbox_gt[0] + sub_bbox_gt[2]) / 2, (sub_bbox_gt[1] + sub_bbox_gt[3]) / 2)]
 
 
-                # Calculate the center of sub_bbox_gt as coord
-                # sub_bbox_gt format: [x_min, y_min, x_max, y_max], values in [0, 1]
-                coord = [((sub_bbox_gt[0] + sub_bbox_gt[2]) / 2, (sub_bbox_gt[1] + sub_bbox_gt[3]) / 2)]
-                conv = {
-                    "role": assistant_role,
-                    "content": [{"type": "text", "text": assistant_content}],
-                    "recipient": "action_executor",
-                    "end_turn": conv.get("end_turn", True),
-                    # "bbox_gt": bbox_gt, # original image bbox
-                    "sub_bbox_gt": sub_bbox_gt # cropped image bbox
-                }                    
+                    sub_image_placeholder = [
+                        {
+                            "type": "image",
+                            "image": sub_image_b64,
+                            "min_pixels": self.processor.image_processor.min_pixels,
+                            "max_pixels": self.processor.image_processor.max_pixels,
+                        }
+                    ]
 
-                if len(image_inputs) == 0:
-                    raise ValueError("No image found for visual grounding")
-                # replace the coordinates with the special tokens
-                # text, coord = reformat_coordinates(conv["content"][0]["text"])
-                text, _ = reformat_coordinates(conv["content"][0]["text"])
-                conv["content"][0]["text"] = text
-                # rank0_print(f"coord: {coord}")
+                    conv_vision = {
+                        "role": role,
+                        "content": sub_image_placeholder + [{"type": "text", "text": content}], # content记得加内容
+                    }
 
-                # get the visual token indices of the coordinates
-                coordinates.extend(coord)
-                for (point_x, point_y) in coord:
-                    try:
-                        visual_token_index = get_token_index(
-                            processor.image_processor,
-                            sub_image,  # 注意：这里应该是 sub_image 而不是 [image_inputs]
-                            point_x,
-                            point_y
-                        )
-                    except Exception as e:
-                        print(f"=== ERROR in get_token_index: {e} ===")
-                        import traceback
-                        traceback.print_exc()
-                        raise  # 重新抛出异常以便调试
-                    # px, py = token_index_to_coordinates(
-                    #     processor.image_processor,
-                    #     visual_token_index,
-                    #     image_list[0].size[0], # make sure the size here is after qwen2vl processing
-                    #     image_list[0].size[1]
-                    # )
-                    # rank0_print(f"estimated px: {px}, py: {py}")
-                    visual_token_indices_of_coordinates.append(visual_token_index)
+                    image_inputs, _ = process_vision_info([conv_vision]) # list of PIL.Image.Image
 
-                    if conv["sub_bbox_gt"] is not None:
-                        patch_mask = get_multi_patch_labels(
-                            processor.image_processor,
-                            sub_image,
-                            conv["sub_bbox_gt"]
-                        )  
-                        multi_patch_labels.append(patch_mask)
+                    conv = {
+                        "role": role,
+                        "content": sub_image_placeholder + [{"type": "text", "text": content}], # TODO: content记得加内容
+                        "recipient": "action_executor",
+                        "end_turn": conv.get("end_turn", True),
+                        # "bbox_gt": bbox_gt, # original image bbox
+                        "sub_bbox_gt": sub_bbox_gt # cropped image bbox
+                    }                    
+
+                    if conv["recipient"] == "action_executor":
+                        if len(image_inputs) == 0:
+                            raise ValueError("No image found for visual grounding")
+                        # replace the coordinates with the special tokens
+                        # text, coord = reformat_coordinates(conv["content"][0]["text"])
+                        text, _ = reformat_coordinates(conv["content"][1]["text"])
+                        conv["content"][1]["text"] = text
+                        # rank0_print(f"coord: {coord}")
+
+                        # get the visual token indices of the coordinates
+                        coordinates.extend(coord)
+                        for (point_x, point_y) in coord:
+                            try:
+                                visual_token_index = get_token_index(
+                                    processor.image_processor,
+                                    image_inputs,  # 注意：这里应该是 image_inputs 而不是 [image_inputs]
+                                    point_x,
+                                    point_y
+                                )
+                            except Exception as e:
+                                print(f"=== ERROR in get_token_index: {e} ===")
+                                import traceback
+                                traceback.print_exc()
+                                raise  # 重新抛出异常以便调试
+                            # px, py = token_index_to_coordinates(
+                            #     processor.image_processor,
+                            #     visual_token_index,
+                            #     image_list[0].size[0], # make sure the size here is after qwen2vl processing
+                            #     image_list[0].size[1]
+                            # )
+                            # rank0_print(f"estimated px: {px}, py: {py}")
+                            visual_token_indices_of_coordinates.append(visual_token_index)
+
+                            if conv["sub_bbox_gt"] is not None:
+                                patch_mask = get_multi_patch_labels(
+                                    processor.image_processor,
+                                    image_inputs,
+                                    conv["sub_bbox_gt"]
+                                )  
+                                multi_patch_labels.append(patch_mask)
 
                 templated_conv = tokenizer.apply_chat_template(
                     conversation=[conv],
                     chat_template=assistant_template,
                     tokenize=False,
                 )
-                inputs = processor(text=[templated_conv], return_tensors="pt")
+                inputs = processor(text=[templated_conv], image=image_inputs, return_tensors="pt")
 
-                encode_id = inputs.input_ids[0].tolist()
-                input_id += encode_id
+                if pixel_values is None and image_grid_thw is None:
+                    pixel_values = inputs["pixel_values"]
+                    image_grid_thw = inputs["image_grid_thw"]
+                else:
+                    pixel_values = torch.cat([pixel_values, inputs["pixel_values"]], dim=0) # 形状: (13416 + M, 1176)
+                    image_grid_thw = torch.cat([image_grid_thw, inputs["image_grid_thw"]], dim=0) # (2, 3)
+ 
+            encode_id = inputs.input_ids[0].tolist()
+
+            input_id += encode_id
+            if role in ["user", "system"]:
+                target += [IGNORE_INDEX] * len(encode_id)
+            else: # TODO: 当role为assistant时，应当忽略vision占位符
                 target += encode_id
-
-            else:
-                assert False, "Currently we only support conversations with images"
-
 
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
 
