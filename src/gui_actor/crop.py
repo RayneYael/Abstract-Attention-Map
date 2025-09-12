@@ -105,7 +105,10 @@ def crop_image_for_training(original_image: Image.Image, original_gt_bbox: list[
 
     try:
         img_width, img_height = original_image.size
-        x1, y1, x2, y2 = map(int, original_gt_bbox)
+        x1 = int(original_gt_bbox[0] * img_width)
+        y1 = int(original_gt_bbox[1] * img_height)
+        x2 = int(original_gt_bbox[2] * img_width)
+        y2 = int(original_gt_bbox[3] * img_height)
         bbox_width = x2 - x1
         bbox_height = y2 - y1
 
@@ -128,19 +131,19 @@ def crop_image_for_training(original_image: Image.Image, original_gt_bbox: list[
         offset = [crop_x, crop_y]
         
         sub_image_gt_bbox = [
-            x1 - crop_x,
-            y1 - crop_y,
-            x2 - crop_x,
-            y2 - crop_y,
+            (x1 - crop_x)/crop_width,
+            (y1 - crop_y)/crop_height,
+            (x2 - crop_x)/crop_width,
+            (y2 - crop_y)/crop_height,
         ]
 
-        return {
-            "sub_image": sub_image,
-            "sub_image_b64": pil_to_base64(sub_image),
-            "offset": offset,
-            "sub_image_gt_bbox": sub_image_gt_bbox,
-            "original_gt_bbox": original_gt_bbox
-        }
+        return (
+            sub_image,
+            pil_to_base64(sub_image),
+            offset,
+            sub_image_gt_bbox,
+            original_gt_bbox
+        )
     except Exception as e:
         print(f"Error during cropping: {e}")
         return None

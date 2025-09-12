@@ -6,7 +6,7 @@ import random
 import re
 import ast
 from typing import Dict
-
+from PIL import Image
 import torch
 import transformers
 import yaml
@@ -443,7 +443,6 @@ class LazySupervisedDataset(Dataset):
                 if role in ["user", "system"]:
                     conv = {"role": role, "content": [{"type": "text", "text": content}]}
                 else:  # assistant
-                    
                     sub_image, sub_image_b64, sub_image_offset, sub_bbox_gt, bbox_gt = crop_image_for_training(original_image, conv.get("bbox_gt", []))
 
                     # Calculate the center of sub_bbox_gt as coord
@@ -471,7 +470,7 @@ class LazySupervisedDataset(Dataset):
                         "role": role,
                         "content": sub_image_placeholder + [{"type": "text", "text": content}], # TODO: content记得加内容
                         # "recipient": conv.get("recipient", "os"),
-                        "recipient": "vision_analyzer"
+                        "recipient": "vision_analyzer",
                         "end_turn": conv.get("end_turn", True),
                         # "bbox_gt": bbox_gt, # original image bbox
                         "sub_bbox_gt": sub_bbox_gt # cropped image bbox
