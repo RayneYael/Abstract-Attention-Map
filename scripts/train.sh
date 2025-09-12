@@ -7,6 +7,7 @@ output_dir="./checkpoints/${model_type}_sft"
 # === Training Command ===
 torchrun --nproc_per_node=4 train.py \
   --deepspeed ./scripts/zero3.json \
+  --save_total_limit 3 \
   --data_path data/data_config.yaml \
   --image_folder "" \
   --model_type ${model_type} \
@@ -39,4 +40,6 @@ torchrun --nproc_per_node=4 train.py \
   --unfreeze_new_tokens False \
   --unfreeze_visual False \
   --pointer_loss_weight 1.0 \
-  --lm_loss_weight 1.0
+  --lm_loss_weight 1.0 \
+  --report_to tensorboard \
+  --logging_dir ${output_dir}/runs

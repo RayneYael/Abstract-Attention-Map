@@ -4,16 +4,16 @@ datasets:
   #   sampling_strategy: "first:100"
   - json_path: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/guienvs/guienv_bbox.json
     images_folder: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/guienvs/images
-    sampling_strategy: "first:100"
+    sampling_strategy: "first:10"
   - json_path: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/GUIAct/guiact_bbox.json
     images_folder: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/GUIAct/web_imgs
-    sampling_strategy: "first:100"
+    sampling_strategy: "first:10"
   # - json_path: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/amex/amex_bbox.json
   #   images_folder: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/amex/screenshots
   #   sampling_strategy: "first:100"
   - json_path: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/AndroidControl/androidcontrol_bbox.json
     images_folder: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/AndroidControl/tfrecord/images
-    sampling_strategy: "first:100"
+    sampling_strategy: "first:10"
   - json_path: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/Wave-UI/wave_ui_bbox.json
     images_folder: /data/sfs/home/rensiyu/Attention/datasets/GUI-Actor-Data/Wave-UI/images_fixed
-    sampling_strategy: "first:100"
+    sampling_strategy: "first:10"

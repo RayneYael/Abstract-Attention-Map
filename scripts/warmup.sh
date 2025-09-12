@@ -5,8 +5,9 @@ llm_model="Qwen/Qwen2.5-VL-7B-Instruct"
 output_dir="./checkpoints/${model_type}_warmup"
 
 # === Training Command ===
-torchrun --nproc_per_node=4 --master_port=9500 train.py \
+CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 torchrun --nproc_per_node=7 train.py \
   --deepspeed ./scripts/zero3.json \
+  --save_total_limit 3 \
   --data_path data/data_config.yaml \
   --image_folder "" \
   --model_type ${model_type} \
@@ -39,4 +40,6 @@ torchrun --nproc_per_node=4 --master_port=9500 train.py \
   --unfreeze_new_tokens True \
   --unfreeze_visual False \
   --pointer_loss_weight 1.0 \
-  --lm_loss_weight -1.0
+  --lm_loss_weight -1.0 \
+  --report_to tensorboard \
+  --logging_dir ${output_dir}/runs
