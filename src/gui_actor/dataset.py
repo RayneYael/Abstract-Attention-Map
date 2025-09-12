@@ -488,12 +488,18 @@ class LazySupervisedDataset(Dataset):
                         # get the visual token indices of the coordinates
                         coordinates.extend(coord)
                         for (point_x, point_y) in coord:
-                            visual_token_index = get_token_index(
-                                processor.image_processor,
-                                [image_inputs],
-                                point_x,
-                                point_y
-                            )
+                            try:
+                                visual_token_index = get_token_index(
+                                    processor.image_processor,
+                                    image_inputs,  # 注意：这里应该是 image_inputs 而不是 [image_inputs]
+                                    point_x,
+                                    point_y
+                                )
+                            except Exception as e:
+                                print(f"=== ERROR in get_token_index: {e} ===")
+                                import traceback
+                                traceback.print_exc()
+                                raise  # 重新抛出异常以便调试
                             # px, py = token_index_to_coordinates(
                             #     processor.image_processor,
                             #     visual_token_index,
@@ -506,7 +512,7 @@ class LazySupervisedDataset(Dataset):
                             if conv["sub_bbox_gt"] is not None:
                                 patch_mask = get_multi_patch_labels(
                                     processor.image_processor,
-                                    [image_inputs],
+                                    image_inputs,
                                     conv["sub_bbox_gt"]
                                 )  
                                 multi_patch_labels.append(patch_mask)
