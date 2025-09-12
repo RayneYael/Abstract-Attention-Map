@@ -170,8 +170,8 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                 pixel_values = pixel_values.type(self.visual.dtype)
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw) # (total_patches, hidden_dim)
 
-                patches_per_image = (image_grid_thw[:, 0] * image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
-                n_image_features_img1 = patches_per_image[0]
+                patches_per_image = ((image_grid_thw[:, 0] * image_grid_thw[:, 1] * image_grid_thw[:, 2]) // self.visual.config.spatial_merge_size ** 2).tolist()
+                n_image_features_img1 = patches_per_image[0] 
                 n_image_features_img2 = patches_per_image[1]
                 # 验证总数是否匹配
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
@@ -179,12 +179,7 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                 assert n_image_features_total == sum(patches_per_image)
                 assert n_image_tokens == n_image_features_total
 
-                n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
-                n_image_features = image_embeds.shape[0]
-                if n_image_tokens != n_image_features:
-                    raise ValueError(
-                        f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
-                    )
+
                 image_mask = (
                     (input_ids == self.config.image_token_id)
                     .unsqueeze(-1)
@@ -291,15 +286,29 @@ class Qwen2_5_VLForConditionalGenerationWithPointer(Qwen2_5_VLForConditionalGene
                 # visual_indices = torch.nonzero(visual_mask, as_tuple=False).squeeze(-1) # shape: (n_visual,)
                 # 识别所有visual tokens的索引
                 visual_mask = (token_ids == self.config.image_token_id)
-                all_visual_indices = torch.nonzero(visual_mask, as_tuple=False).squeeze(-1)  # shape: (n_visual_total,)
+                # all_visual_indices = torch.nonzero(visual_mask, as_tuple=False).squeeze(-1)  # shape: (n_visual_total,)
 
-                # 只保留第二张图片对应的visual tokens
-                # 第二张图片的visual tokens从第一张图片的patch数量开始
-                start_idx_img2 = n_image_features_img1
-                end_idx_img2 = n_image_features_img1 + n_image_features_img2
+                # 找到所有vision_start和vision_end的位置
+                vision_start_id = self.config.vision_start_token_id
+                vision_end_id = self.config.vision_end_token_id
+                image_pad_id = self.config.vision_token_id
+
+                start_idx_img1 = (token_ids == vision_start_id).nonzero(as_tuple=True)[0]
+                end_idx_img1 = (token_ids == vision_end_id).nonzero(as_tuple=True)[0]
+                # 第二张图片的范围
+                start_idx_img2 = start_idx_img1[1]
+                end_idx_img2 = end_idx_img1[1]
+
+                # 在这个范围内找visual tokens
+                img2_mask = torch.zeros_like(token_ids, dtype=torch.bool)
+                img2_mask[start_idx_img2:end_idx_img2] = True
+                visual_mask = (token_ids == self.config.image_token_id)
+                
+                # 第二张图片的visual token indices
+                visual_indices = torch.nonzero(img2_mask & visual_mask, as_tuple=False).squeeze(-1)              
 
                 # 获取第二张图片的visual indices
-                visual_indices = all_visual_indices[start_idx_img2:end_idx_img2]  # shape: (n_image_features_img2,)
+                # visual_indices = all_visual_indices[start_idx_img2:end_idx_img2]  # shape: (n_image_features_img2,)
 
 
                 # Identify target tokens (the ones that should attend to visual features).
