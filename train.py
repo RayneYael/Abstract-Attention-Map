@@ -4,7 +4,7 @@ from typing import Dict, Optional, Sequence
 
 import os
 import sys
-sys.path.append('/data/sfs/home/rensiyu/Attention/Abstract-Attention-Map/src') 
+sys.path.append('/ssd/rensiyu/Attention/Abstract-Attention-Map/src') 
 import json
 import torch
 import transformers
