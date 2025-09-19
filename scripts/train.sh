@@ -1,11 +1,11 @@
 #!/bin/bash
 # model_type: qwen2vl or qwen25vl
-model_type="qwen2vl"
+model_type="qwen25vl"
 llm_model="./checkpoints/${model_type}_warmup"
 output_dir="./checkpoints/${model_type}_sft"
 
 # === Training Command ===
-torchrun --nproc_per_node=4 train.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 train.py \
   --deepspeed ./scripts/zero3.json \
   --save_total_limit 3 \
   --data_path data/data_config.yaml \
